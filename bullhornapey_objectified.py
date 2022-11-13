@@ -3,6 +3,8 @@ import json
 from getpass import getpass
 from urllib.parse import parse_qs
 from os import system
+import operator
+import curses
 
 
 def validated_integer(prompt, digits=0):
@@ -19,14 +21,12 @@ def validated_integer(prompt, digits=0):
                     return i
         except ValueError:
             print("Please enter a valid whole number.")
-            
-            
+
+
 def print_list(items, numbered=True):
-    i = 0
-    for item in items:
+    for i, item in enumerate(items, start=1):
         if numbered:
             print(f'{i} - {item}')
-            i += 1
         else:
             print(item)
 
@@ -42,14 +42,15 @@ def select_yes_no(prompt=""):
         elif 'n' in prompt:
             return False
         print("Input not recognized, please try again.")
-    
-        
+
+
 def choose_from_list(items):
     print_list(items)
     while True:
         try:
             choice = validated_integer("Pick an item:")
-            return items[choice]
+            system('cls')
+            return items[(choice-1)]
         except IndexError:
             print("Please choose a valid item.")
 
@@ -84,6 +85,9 @@ def request_handler(request_url, method):
                 print("10 Failures to connect. Aborting.")
                 break
             continue
+        elif response.status_code == 401:
+            print(response.text)
+            rest_object.token = input(validated_string("BhRestToken invalid, please enter one now: "))
         else:
             if response.text:
                 print(response.text)
@@ -219,5 +223,179 @@ class RestInfo:
         self.token = input("Enter a BhRestToken: ")
 
 
+def curses_columned_list(list_win, item_list, items_per_column, item_highlighted, selected_items=[]):
+    curses.start_color()
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
+    y = 1
+    x = 0
+    longest = 0
+    first = True
+    for i in item_list:
+        if len(i) > longest:
+            longest = len(i)
+        if y < items_per_column:
+            if first:
+                y = 1
+            else:
+                y += 1
+        else:
+            x += longest + 3
+            y = 1
+            longest = 0
+        if i == item_highlighted:
+            list_win.addstr(y, x, i, curses.A_REVERSE)
+        else:
+            list_win.addstr(y, x, i)
+        list_win.refresh()
+        first = False
+    string = ""
+
+
+def cursed_list(item_list):
+    stdscr = curses.initscr()
+    screen_y, screen_x = stdscr.getmaxyx()
+    stdscr.addstr(0, 0, "Choose your items. Arrow keys to move, enter to select, tab to proceed with currently selected items.")
+    stdscr.addstr(1, 0, "Type in letters to filter the list.")
+    stdscr.refresh()
+    curses.noecho()
+
+    list_win = curses.newwin((screen_y - 4), screen_x, 4, 0)
+    list_win.keypad(True)
+    win_y, win_x = list_win.getmaxyx()
+    items_per_column = win_y - 1
+
+    selected_list_win = curses.newwin(2, screen_x, 2, 0)
+
+    highlight = 0
+    printing_list = item_list
+    curses_columned_list(list_win, printing_list, items_per_column, printing_list[highlight])
+
+    string = ""
+    selected_items = []
+    while True:
+        list_index = len(printing_list)-1
+
+        key = list_win.getkey()
+        if key == '\b':
+            if string != "":
+                string = string[:-1]
+                highlight = 0
+
+        elif key == '\n':
+            if printing_list[highlight] in selected_items:
+                selected_items.remove(printing_list[highlight])
+            else:
+                selected_items.append(printing_list[highlight])
+
+        elif key == 'KEY_UP':
+            highlight -= 1
+            if highlight < 0:
+                highlight = list_index
+
+        elif key == 'KEY_DOWN':
+            highlight += 1
+            if highlight > list_index:
+                highlight = 0
+
+        elif key == 'KEY_LEFT':
+            highlight -= items_per_column
+            if highlight < 0:
+                highlight = list_index
+
+        elif key == 'KEY_RIGHT':
+            highlight += items_per_column
+            if highlight > list_index:
+                highlight = 0
+
+        elif key == '\t':
+            list_win.clear()
+            list_win.addstr(0, 0, "Press ENTER to return with the selected items"
+                                  ", or any other key to continue choosing items. ")
+            if list_win.getkey() == '\n':
+                break
+
+        else:
+            string += key
+            highlight = 0
+
+        list_win.clear()
+        list_win.addstr(0, 0, string)
+        list_win.refresh()
+
+        if string != "":
+            printing_list = []
+            for i in item_list:
+                if string.lower() in i.lower():
+                    printing_list.append(i)
+        else:
+            printing_list = item_list
+
+        selected_list_win.clear()
+        selected_list_win.addstr(0, 0, ', '.join(selected_items))
+        selected_list_win.refresh()
+
+        stdscr.refresh()
+        curses_columned_list(list_win, printing_list, items_per_column, printing_list[highlight], selected_items)
+
+    list_win.keypad(False)
+    curses.echo()
+    curses.endwin()
+
+
+def query_builder(entity):
+    criteria = []
+    query_string = "query="
+    # Downloading candidate metadata
+    entity_metadata = Entity(entity)
+    label_list = []
+    for i in entity_metadata.fields:
+        label_list.append(i.label)
+    cursed_list(label_list)
+
+
+class Entity:
+    name = ""
+    fields = []
+
+    def __init__(self, entity):
+        self.name = entity
+        meta_url = f"{rest_object.rest_url}/meta/{entity}?fields=*&meta=full&BhRestToken={rest_object.token}"
+        entity_metadata = request_handler(meta_url, "get")
+        entity_metadata = json.loads(entity_metadata.text)
+        optional_elements = ['label', 'dataType', 'type', 'required', 'options']
+        for field in entity_metadata['fields']:
+            if field['name'] == 'id':
+                field['readOnly'] = False
+            if 'readOnly' in field:
+                if 'sortOrder' not in field:
+                    field['sortOrder'] = 0
+                if not field['readOnly']:
+                    for element in optional_elements:
+                        if element not in field:
+                            field[element] = "N/A"
+                    print()
+                    self.fields.append(self.Field(field))
+        self.fields = sorted(self.fields, key=operator.attrgetter('sortOrder'))
+
+    class Field:
+        def __init__(self, field_items):
+            self.name = field_items['name']
+            self.label = field_items['label']
+            self.sortOrder = field_items['sortOrder']
+            self.dataType = field_items['dataType']
+            self.type = field_items['type']
+            self.required = field_items['required']
+            if 'options' in field_items:
+                self.options = field_items['options']
+
+
+class Search:
+    def __init__(self, entity):
+        url = f"{rest_object.rest_url}/search/{entity}"
+        query_builder(entity)
+
+
 rest_object = RestInfo()
+results = Search("Candidate")
 wait = input("Done..")
